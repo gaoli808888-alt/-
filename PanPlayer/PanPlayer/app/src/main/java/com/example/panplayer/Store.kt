@@ -9,6 +9,9 @@ object Store {
     fun init(c: Context) { if (!::sp.isInitialized) sp = c.applicationContext.getSharedPreferences("pp", 0) }
     private fun str(k: String) = sp.getString(k, "") ?: ""
     private fun put(k: String, v: String) = sp.edit().putString(k, v).apply()
+    var fileGrid: Boolean
+        get() = sp.getBoolean("fileGrid", false)
+        set(v) { sp.edit().putBoolean("fileGrid", v).apply() }
     var token: String
         get() = str("token")
         set(v) = put("token", v)
