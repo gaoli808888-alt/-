@@ -88,7 +88,7 @@ fun play(ctx: Context, list: List<Vid>, i: Int) {
 }
 
 @Composable fun Poster(title: String, modifier: Modifier = Modifier, folder: Boolean = false, star: Boolean = false,
-                       frac: Float = 0f, onLong: (() -> Unit)? = null, onClick: () -> Unit) {
+                       frac: Float = 0f, fullTitle: Boolean = false, onLong: (() -> Unit)? = null, onClick: () -> Unit) {
     val poster by produceState<String?>(null, title) {
         if (!folder) value = withContext(Dispatchers.IO) { runCatching { Tmdb.byTitle(title) }.getOrNull() }
     }
@@ -99,7 +99,7 @@ fun play(ctx: Context, list: List<Vid>, i: Int) {
             if (star) Text("★", color = Color(0xFFFFC107), modifier = Modifier.align(Alignment.TopEnd).padding(6.dp))
             if (frac > 0.02f) LinearProgressIndicator(progress = { frac }, modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(3.dp))
         }
-        Text(title, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        Text(title, maxLines = if (fullTitle) Int.MAX_VALUE else 2, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
     }
 }
 
@@ -189,44 +189,127 @@ fun play(ctx: Context, list: List<Vid>, i: Int) {
 @Composable fun FilesTab() {
     val ctx = LocalContext.current
     var path by remember { mutableStateOf("/") }
-    var items by remember { mutableStateOf<List<Item>>(emptyList()) }
+    var entries by remember { mutableStateOf<List<Item>>(emptyList()) }
     var err by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(true) }
+    var refresh by remember { mutableIntStateOf(0) }
+    var grid by remember { mutableStateOf(Store.fileGrid) }
+    var sizeSort by remember { mutableStateOf(false) }
     var season by remember { mutableStateOf<Int?>(null) }
     var roots by remember { mutableStateOf(Store.roots) }
-    LaunchedEffect(path) {
-        season = null; err = ""
-        try {
-            items = withContext(Dispatchers.IO) {
-                Baidu.list(path).filter { it.isDir || Fx.VIDEO.matches(it.name) }
-                    .sortedWith(compareByDescending<Item> { it.isDir }.thenBy { it.name })
-            }
-        } catch (e: Exception) { err = e.message ?: "加载失败" }
+    var progressVersion by remember { mutableIntStateOf(0) }
+    DisposableEffect(ctx) {
+        val owner = ctx as? androidx.lifecycle.LifecycleOwner
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) progressVersion++
+        }
+        owner?.lifecycle?.addObserver(observer)
+        onDispose { owner?.lifecycle?.removeObserver(observer) }
     }
-    BackHandler(path != "/") { path = path.substringBeforeLast('/').ifEmpty { "/" } }
-    val vids = items.filter { !it.isDir }.map { Vid(it.fsId, it.path, it.name) }
+    LaunchedEffect(path, refresh) {
+        season = null; err = ""; loading = true; entries = emptyList()
+        try {
+            entries = withContext(Dispatchers.IO) {
+                Baidu.list(path).filter { it.isDir || Fx.VIDEO.matches(it.name) }
+            }
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { err = e.message ?: "加载失败" }
+        finally { loading = false }
+    }
+    fun parent() { path = path.substringBeforeLast('/').ifEmpty { "/" } }
+    BackHandler(path != "/") { parent() }
+    val sorted = remember(entries, sizeSort) {
+        if (sizeSort) entries.sortedWith(compareByDescending<Item> { it.isDir }.thenByDescending { it.size }.thenBy { it.name.lowercase() })
+        else entries.sortedWith(compareByDescending<Item> { it.isDir }.thenBy { it.name.lowercase() })
+    }
+    val vids = sorted.filter { !it.isDir }.map { Vid(it.fsId, it.path, it.name) }
     val seasons = vids.mapNotNull { Lib.ep(it.name)?.s }.distinct().sorted()
     val playlist = vids.filter { season == null || Lib.ep(it.name)?.s == season }
-    val shown = items.filter { it.isDir || season == null || Lib.ep(it.name)?.s == season }
+    val shown = sorted.filter { it.isDir || season == null || Lib.ep(it.name)?.s == season }
+    fun open(f: Item) {
+        if (f.isDir) path = f.path
+        else {
+            val index = playlist.indexOfFirst { it.id == f.fsId }
+            if (index >= 0) play(ctx, playlist, index)
+        }
+    }
+    fun toggle(f: Item) {
+        roots = if (f.path in roots) roots - f.path else roots + f.path
+        Store.roots = roots
+        Toast.makeText(ctx, if (f.path in roots) "已加入媒体库" else "已移出媒体库", Toast.LENGTH_SHORT).show()
+    }
     Column(Modifier.fillMaxSize()) {
-        Text(if (path == "/") "我的网盘（长按文件夹 = 加入/移出媒体库）" else path, fontSize = 13.sp, color = Color(0xFF9A9AA2), modifier = Modifier.padding(12.dp, 2.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (path != "/") TextButton({ parent() }) { Text("‹ 上一级") }
+            Text(if (path == "/") "我的网盘" else path.substringAfterLast('/'),
+                modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            TextButton({ refresh++ }, enabled = !loading) { Text("刷新") }
+        }
+        Text(path, fontSize = 12.sp, color = Color(0xFF9A9AA2),
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 4.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(!grid, { grid = false; Store.fileGrid = false }, label = { Text("列表") })
+            FilterChip(grid, { grid = true; Store.fileGrid = true }, label = { Text("海报") })
+            TextButton({ sizeSort = !sizeSort }) { Text(if (sizeSort) "大小 ↓" else "名称 ↑") }
+        }
+        Text("长按文件夹加入或移出媒体库", fontSize = 12.sp, color = Color(0xFF9A9AA2),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         if (seasons.size > 1) LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item { FilterChip(season == null, { season = null }, label = { Text("全部") }) }
             items(seasons) { n -> FilterChip(season == n, { season = n }, label = { Text("第${n}季") }) }
         }
-        if (err.isNotEmpty()) Text(err, color = Color(0xFFFF6B6B), modifier = Modifier.padding(16.dp))
-        LazyVerticalGrid(GridCells.Adaptive(110.dp), contentPadding = PaddingValues(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            items(shown, key = { it.fsId }) { f ->
-                val toggle: () -> Unit = {
-                    roots = if (f.path in roots) roots - f.path else roots + f.path
-                    Store.roots = roots
-                    Toast.makeText(ctx, if (f.path in roots) "已加入媒体库" else "已移出媒体库", Toast.LENGTH_SHORT).show()
+        when {
+            loading -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CircularProgressIndicator()
+                    Text("正在加载文件…")
                 }
-                Poster(if (f.isDir) f.name else Tmdb.clean(f.name).ifEmpty { f.name }, folder = f.isDir, star = f.isDir && f.path in roots,
-                    frac = if (f.isDir) 0f else Store.frac(f.fsId), onLong = if (f.isDir) toggle else null) {
-                    if (f.isDir) path = f.path else play(ctx, playlist, playlist.indexOfFirst { it.id == f.fsId }.coerceAtLeast(0))
+            }
+            err.isNotEmpty() -> Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(err, color = Color(0xFFFF8B8B))
+                TextButton({ refresh++ }) { Text("重试") }
+            }
+            shown.isEmpty() -> Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                Text(if (entries.isEmpty()) "此目录暂无文件夹或可播放视频" else "当前筛选下没有视频", color = Color(0xFF9A9AA2))
+            }
+            grid -> LazyVerticalGrid(GridCells.Adaptive(120.dp), modifier = Modifier.weight(1f), contentPadding = PaddingValues(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                items(shown, key = { it.fsId }) { f ->
+                    val fraction = remember(f.fsId, progressVersion) { Store.frac(f.fsId).coerceIn(0f, 1f) }
+                    Poster(f.name, folder = f.isDir, star = f.isDir && f.path in roots,
+                        frac = if (f.isDir) 0f else fraction, fullTitle = true,
+                        onLong = if (f.isDir) ({ toggle(f) }) else null) { open(f) }
+                }
+            }
+            else -> LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(shown, key = { it.fsId }) { f ->
+                    val fraction = remember(f.fsId, progressVersion) { Store.frac(f.fsId).coerceIn(0f, 1f) }
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF1B1B22))
+                        .combinedClickable(onClick = { open(f) }, onLongClick = if (f.isDir) ({ toggle(f) }) else null)
+                        .padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (f.isDir) "📁" else "▶", fontSize = 25.sp, color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.width(42.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(f.name, fontSize = 15.sp)
+                            Text(if (f.isDir) (if (f.path in roots) "文件夹 · 已加入媒体库 ★" else "文件夹")
+                                else fileSize(f.size) + if (fraction > 0f) " · 已看 ${(fraction * 100).toInt()}%" else " · 未观看",
+                                fontSize = 12.sp, color = Color(0xFFABAAB5))
+                            if (!f.isDir && fraction > 0f) LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth().height(3.dp))
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+private fun fileSize(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val units = arrayOf("KB", "MB", "GB", "TB")
+    var value = bytes.toDouble() / 1024
+    var unit = 0
+    while (value >= 1024 && unit < units.lastIndex) { value /= 1024; unit++ }
+    return String.format(java.util.Locale.ROOT, "%.1f %s", value, units[unit])
 }

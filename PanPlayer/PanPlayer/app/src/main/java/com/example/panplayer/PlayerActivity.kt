@@ -36,9 +36,34 @@ class PlayerActivity : ComponentActivity() {
     private val tip = mutableStateOf("")
     private val aud = mutableStateOf<List<Pair<Int, String>>>(emptyList())
     private val spu = mutableStateOf<List<Pair<Int, String>>>(emptyList())
+    private val pictureMode = mutableIntStateOf(0)
+    private val pictureLabels = listOf("适应", "铺满", "拉伸")
+    private val pictureScales = listOf(
+        MediaPlayer.ScaleType.SURFACE_BEST_FIT,
+        MediaPlayer.ScaleType.SURFACE_FIT_SCREEN,
+        MediaPlayer.ScaleType.SURFACE_FILL
+    )
+
+    private fun applyPictureMode() {
+        if (::mp.isInitialized) mp.setVideoScale(pictureScales[pictureMode.intValue])
+    }
+
+    private fun selectPictureMode(mode: Int) {
+        pictureMode.intValue = mode.coerceIn(0, pictureScales.lastIndex)
+        getSharedPreferences("pp", MODE_PRIVATE).edit()
+            .putInt("pictureMode", pictureMode.intValue).apply()
+        applyPictureMode()
+        tip.value = when (pictureMode.intValue) {
+            1 -> "铺满：保持比例，裁剪边缘"
+            2 -> "拉伸：填满屏幕，画面可能变形"
+            else -> "适应：保留完整画面"
+        }
+    }
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b); Store.init(this)
+        pictureMode.intValue = getSharedPreferences("pp", MODE_PRIVATE)
+            .getInt("pictureMode", 0).coerceIn(0, pictureScales.lastIndex)
         ids = intent.getLongArrayExtra("ids") ?: return finish()
         paths = intent.getStringArrayExtra("paths") ?: return finish()
         names = intent.getStringArrayExtra("names") ?: return finish()
@@ -50,7 +75,7 @@ class PlayerActivity : ComponentActivity() {
             when (e.type) {
                 MediaPlayer.Event.TimeChanged -> { pos.longValue = e.timeChanged }
                 MediaPlayer.Event.LengthChanged -> { len.longValue = e.lengthChanged }
-                MediaPlayer.Event.Playing -> { playing.value = true; refresh() }
+                MediaPlayer.Event.Playing -> { playing.value = true; applyPictureMode(); refresh() }
                 MediaPlayer.Event.Paused -> { playing.value = false }
                 MediaPlayer.Event.ESAdded -> { refresh() }
                 MediaPlayer.Event.EndReached -> { save(true); if (idx.intValue + 1 < ids.size) start(idx.intValue + 1) else finish() }
@@ -122,7 +147,7 @@ class PlayerActivity : ComponentActivity() {
         LaunchedEffect(tip.value) { if (tip.value.isNotEmpty()) { delay(900); tip.value = "" } }
         LaunchedEffect(ui, playing.value) { if (ui && playing.value) { delay(4000); ui = false } }
         Box(Modifier.fillMaxSize()) {
-            AndroidView({ c -> VLCVideoLayout(c).also { mp.attachViews(it, null, true, false) } }, Modifier.fillMaxSize())
+            AndroidView({ c -> VLCVideoLayout(c).also { mp.attachViews(it, null, true, false); applyPictureMode() } }, Modifier.fillMaxSize())
             Box(Modifier.fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures(
@@ -159,6 +184,11 @@ class PlayerActivity : ComponentActivity() {
                 Row(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Color(0x66000000)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     TextButton({ finish() }) { Text("‹ 返回") }
                     Text(names.getOrElse(idx.intValue) { "" }, maxLines = 1, modifier = Modifier.weight(1f), fontSize = 14.sp)
+                    Pick("比例 · ${pictureLabels[pictureMode.intValue]}", listOf(
+                        0 to "适应 · 完整画面",
+                        1 to "铺满 · 等比裁剪",
+                        2 to "拉伸 · 填满屏幕"
+                    )) { selectPictureMode(it) }
                 }
                 Column(Modifier.align(Alignment.BottomStart).fillMaxWidth().background(Color(0x66000000)).padding(horizontal = 16.dp, vertical = 4.dp)) {
                     val mx = maxOf(1f, len.longValue.toFloat())
